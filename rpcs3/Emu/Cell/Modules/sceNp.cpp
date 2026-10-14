@@ -3668,6 +3668,53 @@ error_code sceNpLookupTitleStorageAsync()
 	return CELL_OK;
 }
 
+// Title Small Storage holds per-title data that Sony's NP servers supplied and that is
+// no longer retrievable for any title. Returning an empty blob is correct for titles that
+// treat it as optional, but some validate its contents and refuse to continue: PSABR
+// (BCUS98472/BCES01435) reads a required mode enum out of it and rejects a zero-filled
+// buffer outright, so its online path cannot be reached at all.
+//
+// This lets the user supply the blob from a file, so preserved or reconstructed data can
+// be used where it exists. Nothing changes when the file is absent.
+//
+//   <rpcs3 config dir>/tss/<TITLE_ID>.bin
+//
+// sitting alongside the existing captures/ and sounds/ directories.
+static bool np_load_title_small_storage(vm::ptr<void> data, u32 maxSize, vm::ptr<u32> contentLength)
+{
+	// Guard both pointers before touching guest memory. The synchronous variant never
+	// dereferences contentLength today, so an unchecked write here would be a new null
+	// dereference on that path rather than a pre-existing one.
+	if (!data || !contentLength)
+	{
+		return false;
+	}
+
+	const std::string path = fs::get_config_dir() + "tss/" + Emu.GetTitleID() + ".bin";
+
+	fs::file blob{path};
+
+	if (!blob)
+	{
+		return false;
+	}
+
+	if (blob.size() > maxSize)
+	{
+		sceNp.error("Title Small Storage file '%s' is %d bytes but the title asked for at most %d; ignoring it", path, blob.size(), maxSize);
+		return false;
+	}
+
+	const std::vector<u8> content = blob.to_vector<u8>();
+
+	std::memset(data.get_ptr(), 0, maxSize);
+	std::memcpy(data.get_ptr(), content.data(), content.size());
+	*contentLength = static_cast<u32>(content.size());
+
+	sceNp.notice("Title Small Storage: supplied %d bytes from '%s'", content.size(), path);
+	return true;
+}
+
 error_code sceNpLookupTitleSmallStorage(s32 transId, vm::ptr<void> data, u32 maxSize, vm::ptr<u32> contentLength, vm::ptr<void> option)
 {
 	sceNp.todo("sceNpLookupTitleSmallStorage(transId=%d, data=*0x%x, maxSize=%d, contentLength=*0x%x, option=*0x%x)", transId, data, maxSize, contentLength, option);
@@ -3699,6 +3746,14 @@ error_code sceNpLookupTitleSmallStorage(s32 transId, vm::ptr<void> data, u32 max
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ONLINE_ID;
 	}
 
+	if (np_load_title_small_storage(data, maxSize, contentLength))
+	{
+		return CELL_OK;
+	}
+
+	// NOTE: unlike the Async variant below, this path leaves *data* and *contentLength*
+	// untouched rather than zeroing them. Left as-is deliberately: changing it is not
+	// part of this feature, but it looks unintended and is worth a maintainer's eye.
 	return CELL_OK;
 }
 
@@ -3731,6 +3786,11 @@ error_code sceNpLookupTitleSmallStorageAsync(s32 transId, vm::ptr<void> data, u3
 	if (nph.get_psn_status() != SCE_NP_MANAGER_STATUS_ONLINE)
 	{
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ONLINE_ID;
+	}
+
+	if (np_load_title_small_storage(data, maxSize, contentLength))
+	{
+		return CELL_OK;
 	}
 
 	// TSS are game specific data we don't have access to, set buf to 0, return size 0
