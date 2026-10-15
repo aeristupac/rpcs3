@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Emu/NP/ip_address.h"
 #include "nt_p2p_port.h"
+#include "Utilities/StrUtil.h"
 #include "lv2_socket_p2ps.h"
 #include "sys_net_helpers.h"
 #include "Emu/NP/signaling_handler.h"
@@ -461,6 +462,15 @@ bool nt_p2p_port::recv_data()
 
 			const u16 framed_remote_vport = read_be16(p2p_recv_data.data() + 2);
 			const u16 framed_local_vport  = read_be16(p2p_recv_data.data() + 4);
+
+			if (sys_net.trace)
+			{
+				const auto* src = reinterpret_cast<const sockaddr_in*>(&native_addr);
+				char src_ip[16];
+				inet_ntop(AF_INET, &src->sin_addr, src_ip, sizeof(src_ip));
+				sys_net.trace("[PSASBR] recv %d bytes from %s:%d:%d -> vport %d: %s", p2p_data.size(), src_ip, ntohs(src->sin_port),
+					framed_remote_vport, framed_local_vport, fmt::buf_to_hexstring(p2p_data.data(), p2p_data.size(), std::max<usz>(p2p_data.size(), 1)));
+			}
 
 			std::lock_guard lock(bound_p2p_vports_mutex);
 			if (framed_local_vport && dispatch_datagram_to_vport(framed_local_vport, framed_remote_vport, p2p_data))

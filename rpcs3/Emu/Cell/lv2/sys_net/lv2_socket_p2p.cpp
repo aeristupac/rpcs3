@@ -6,6 +6,7 @@
 #include "network_context.h"
 #include "sys_net_helpers.h"
 #include "psas_connector.h"
+#include "Utilities/StrUtil.h"
 
 #include <charconv>
 
@@ -423,6 +424,12 @@ std::optional<s32> lv2_socket_p2p::sendto(s32 flags, const std::vector<u8>& buf,
 
 	if (use_raw_psas_frame)
 	{
+		if (sys_net.trace)
+		{
+			sys_net.trace("[PSASBR] send %d bytes vport %d -> %s:%d:%d: %s", buf.size(), vport, ip_str, p2p_port, p2p_vport,
+				fmt::buf_to_hexstring(buf.data(), buf.size(), std::max<usz>(buf.size(), 1)));
+		}
+
 		std::vector<u8> raw_psas;
 		raw_psas.reserve(buf.size() + VPORT_P2P_HEADER_SIZE);
 		const bool payload_is_preframed = has_psas_raw_header;
