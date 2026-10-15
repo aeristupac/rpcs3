@@ -159,37 +159,62 @@ nt_p2p_port::nt_p2p_port(u16 port)
 		fmt::throw_exception("Error setsockopt SO_BROADCAST on P2P socket: %s", get_last_error(true));
 
 	int ret_bind = 0;
-	const u16 be_port = std::bit_cast<u16, be_t<u16>>(port);
 	auto& nph = g_fxo->get<named_thread<np::np_handler>>();
 
-	if (is_ipv6)
+	// PSABR test builds: when another emulator on this computer already holds the P2P port, use the
+	// next free host port instead. The game still sees its own port; peers learn the host port from
+	// RPCN and from the signalling packets themselves. This lets two copies run side by side.
+	u16 host_port = port;
+	for (u16 attempt = 0; attempt < 16; attempt++)
 	{
-		// Some OS(Windows, maybe more) will only support IPv6 adressing by default and we need IPv4 over IPv6
-		optval = 0;
-		if (setsockopt(p2p_socket, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&optval), sizeof(optval)) != 0)
-			fmt::throw_exception("Error setsockopt IPV6_V6ONLY on P2P socket: %s", get_last_error(true));
+		host_port = static_cast<u16>(port + attempt);
+		const u16 be_port = std::bit_cast<u16, be_t<u16>>(host_port);
 
-		::sockaddr_in6 p2p_ipv6_addr{.sin6_family = AF_INET6, .sin6_port = be_port};
-		ret_bind = ::bind(p2p_socket, reinterpret_cast<sockaddr*>(&p2p_ipv6_addr), sizeof(p2p_ipv6_addr));
-	}
-	else
-	{
-		::sockaddr_in p2p_ipv4_addr{.sin_family = AF_INET, .sin_port = be_port};
-		const u32 bind_ip = nph.get_bind_ip();
-		p2p_ipv4_addr.sin_addr.s_addr = bind_ip;
-
-		if (ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr)); ret_bind == -1 && bind_ip)
+		if (is_ipv6)
 		{
-			sys_net.error("Failed to bind to %s:%d, falling back to 0.0.0.0:%d", np::ip_to_string(bind_ip), port, port);
-			p2p_ipv4_addr.sin_addr.s_addr = 0;
-			ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr));
+			// Some OS(Windows, maybe more) will only support IPv6 adressing by default and we need IPv4 over IPv6
+			optval = 0;
+			if (setsockopt(p2p_socket, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&optval), sizeof(optval)) != 0)
+				fmt::throw_exception("Error setsockopt IPV6_V6ONLY on P2P socket: %s", get_last_error(true));
+
+			::sockaddr_in6 p2p_ipv6_addr{.sin6_family = AF_INET6, .sin6_port = be_port};
+			ret_bind = ::bind(p2p_socket, reinterpret_cast<sockaddr*>(&p2p_ipv6_addr), sizeof(p2p_ipv6_addr));
 		}
+		else
+		{
+			::sockaddr_in p2p_ipv4_addr{.sin_family = AF_INET, .sin_port = be_port};
+			const u32 bind_ip = nph.get_bind_ip();
+			p2p_ipv4_addr.sin_addr.s_addr = bind_ip;
+
+			if (ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr)); ret_bind == -1 && bind_ip)
+			{
+				sys_net.error("Failed to bind to %s:%d, falling back to 0.0.0.0:%d", np::ip_to_string(bind_ip), host_port, host_port);
+				p2p_ipv4_addr.sin_addr.s_addr = 0;
+				ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr));
+			}
+		}
+
+		if (ret_bind != -1)
+			break;
+
+#ifdef _WIN32
+		const bool in_use = WSAGetLastError() == WSAEADDRINUSE;
+#else
+		const bool in_use = errno == EADDRINUSE;
+#endif
+		if (!in_use)
+			break;
+
+		sys_net.warning("P2P port %d: host port %d is in use (another emulator?), trying %d", port, host_port, host_port + 1);
 	}
 
 	if (ret_bind == -1)
-		fmt::throw_exception("Failed to bind DGRAM socket to %d for P2P: %s!", port, get_last_error(true));
+		fmt::throw_exception("Failed to bind DGRAM socket to %d for P2P: %s!", host_port, get_last_error(true));
 
-	nph.upnp_add_port_mapping(port, "UDP");
+	if (host_port != port)
+		sys_net.success("P2P port %d is served from host UDP port %d because %d was taken", port, host_port, port);
+
+	nph.upnp_add_port_mapping(host_port, "UDP");
 	sys_net.notice("P2P port %d was bound!", port);
 
 	// --------- ASBR CONNECTOR MODE: the loopback bind itself comes from resolve_binding_ip()
